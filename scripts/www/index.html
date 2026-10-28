@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>单词随机背诵</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui, sans-serif}
+body{padding:20px;max-width:640px;margin:0 auto;background:#f7f8fa}
+.box{background:#fff;border-radius:16px;padding:24px;box-shadow:0 2px 12px #00000010}
+.upload{border:2px dashed #ccc;border-radius:12px;padding:18px;text-align:center;margin-bottom:16px}
+.upload p{margin:6px 0;color:#666;font-size:14px}
+.upload input{margin:8px 0}
+.ctrl-bar{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:16px}
+.card{min-height:240px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;margin:20px 0}
+.front{font-size:34px;font-weight:bold;color:#222;text-align:center;padding:0 10px}
+.back{font-size:24px;color:#555;display:none;text-align:center;padding:0 10px}
+.btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:10px}
+button{padding:11px 16px;border:none;border-radius:10px;font-size:15px;cursor:pointer}
+#flipBtn{background:#4096ff;color:#fff}
+#nextBtn{background:#36cfa2;color:#fff}
+#knowBtn{background:#722ed1;color:#fff}
+#unknowBtn{background:#f5222d;color:#fff}
+#exportBtn{background:#fa8c16;color:#fff}
+#switchMode{background:#13c2c2;color:#fff}
+#switchPool{background:#00b42a;color:#fff}
+.info{color:#777;font-size:14px;text-align:center;margin-top:8px}
+.stat{text-align:center;margin:10px 0;color:#444}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="upload">
+    <p>上传 .docx / .doc 单词文档</p >
+    <input type="file" id="fileInput" accept=".docx,.doc">
+    <p>支持：①一行：单词 - 释义  ②两列表格：单词｜释义</p >
+    <p style="color:#f5222d;font-size:13px">⚠️ .doc旧格式无法直接读取，请另存为docx</p >
+  </div>
+
+  <div class="ctrl-bar">
+    <button id="switchMode">切换翻面模式：英文→中文</button>
+    <button id="switchPool">切换词库：全部单词</button>
+    <button id="exportBtn">导出错词本</button>
+  </div>
+
+  <div class="stat">
+    <span id="statInfo">总词数：0｜错题：0</span>
+  </div>
+
+  <div class="card">
+    <div class="front" id="front">等待上传单词</div>
+    <div class="back" id="back"></div>
+  </div>
+
+  <div class="btns">
+    <button id="flipBtn">翻看答案</button>
+    <button id="nextBtn">下一个随机</button>
+    <button id="knowBtn">✅ 会（移出错题）</button>
+    <button id="unknowBtn">❌ 不会（加入错题）</button>
+  </div>
+</div>
+
+<!-- 本地相对路径引入离线依赖 -->
+<script src="./mammoth.js"></script>
+<script src="./pizzip.js"></script>
+<script>
+const fileInput = document.getElementById('fileInput')
+const frontEl = document.getElementById('front')
+const backEl = document.getElementById('back')
+const flipBtn = document.getElementById('flipBtn')
+const nextBtn = document.getElementById('nextBtn')
+const knowBtn = document.getElementById('knowBtn')
+const unknowBtn = document.getElementById('unknowBtn')
+const exportBtn = document.getElementById('exportBtn')
+const switchModeBtn = document.getElementById('switchMode')
+const switchPoolBtn = document.getElementById('switchPool')
+const statInfo = document.getElementById('statInfo')
+
+let wordList = []
+let wrongList = []
+let current = null
+let enToCn = true
+let useAllPool = true
+
+function updateStat(){
+  statInfo.innerText = `总词数：${wordList.length}｜错题：${wrongList.length}`
+}
+
+fileInput.onchange = async e=>{
+  const f = e.target.files[0]
+  if(!f) return
+
+  const fileName = f.name.toLowerCase()
+  if(fileName.endsWith('.doc') && !fileName.endsWith('.docx')){
+    alert('⚠️ 旧版 .doc 文件无法直接解析！\n请在Word打开文档 →【另存为】，选择格式为 *.docx 后再上传。')
+    fileInput.value = ''
+    return
+  }
+
+  const buf = await f.arrayBuffer()
+  wordList = []
+  try{
+    const zip = new PizZip(buf)
+    const xml = zip.file("word/document.xml").asText()
+    const tableMatch = xml.match(/<w:tr[\s\S]*?<\/w:tr>/g)
+    if(tableMatch && tableMatch.length>0){
+      for(const tr of tableMatch){
+        const tds = tr.match(/<w:t>([\s\S]*?)<\/w:t>/g)
+        if(tds && tds.length>=2){
+          const w = tds[0].replace(/<\/?w:t>/g,'').trim()
+          const m = tds[1].replace(/<\/?w:t>/g,'').trim()
+          if(w && m) wordList.push({w,m})
+        }
+      }
+    }
+  }catch(err){}
+
+  if(wordList.length===0){
+    const res = await mammoth.extractRawText({arrayBuffer:buf})
+    const lines = res.value.split('\n')
+    lines.forEach(line=>{
+      line = line.trim()
+      if(!line) return
+      const sp = line.split('-')
+      if(sp.length>=2){
+        wordList.push({
+          w:sp[0].trim(),
+          m:sp.slice(1).join('-').trim()
+        })
+      }
+    })
+  }
+
+  if(wordList.length===0){
+    frontEl.innerText="识别失败！检查Word格式"
+    backEl.innerText=""
+    return
+  }
+  wrongList = []
+  useAllPool = true
+  switchPoolBtn.innerText = "切换词库：全部单词"
+  updateStat()
+  randomOne()
+}
+
+function getCurrentPool(){
+  return useAllPool ? wordList : wrongList
+}
+
+function randomOne(){
+  const pool = getCurrentPool()
+  if(pool.length === 0){
+    if(!useAllPool){
+      frontEl.innerText = "✅ 错题已经全部清空！切回全部单词"
+      backEl.innerText = ""
+      useAllPool = true
+      switchPoolBtn.innerText = "切换词库：全部单词"
+    }else{
+      frontEl.innerText = "暂无单词，请上传文档"
+      backEl.innerText = ""
+    }
+    return
+  }
+  const idx = Math.floor(Math.random()*pool.length)
+  current = pool[idx]
+  refreshCard()
+}
+
+function refreshCard(){
+  if(enToCn){
+    frontEl.innerText = current.w
+    backEl.innerText = current.m
+  }else{
+    frontEl.innerText = current.m
+    backEl.innerText = current.w
+  }
+  backEl.style.display = 'none'
+}
+
+flipBtn.onclick = ()=>{
+  backEl.style.display = backEl.style.display==='none' ? 'block':'none'
+}
+
+nextBtn.onclick = ()=>{
+  if(getCurrentPool().length===0) return
+  randomOne()
+}
+
+knowBtn.onclick = ()=>{
+  if(!current) return
+  const findIndex = wrongList.findIndex(x=>x.w===current.w && x.m===current.m)
+  if(findIndex > -1){
+    wrongList.splice(findIndex,1)
+    updateStat()
+  }
+  randomOne()
+}
+
+unknowBtn.onclick = ()=>{
+  if(!current) return
+  const exist = wrongList.find(x=>x.w===current.w && x.m===current.m)
+  if(!exist) wrongList.push({w:current.w, m:current.m})
+  updateStat()
+  randomOne()
+}
+
+switchModeBtn.onclick = ()=>{
+  enToCn = !enToCn
+  switchModeBtn.innerText = enToCn ? "切换翻面模式：英文→中文" : "切换翻面模式：中文→英文"
+  if(current) refreshCard()
+}
+
+switchPoolBtn.onclick = ()=>{
+  useAllPool = !useAllPool
+  if(useAllPool){
+    switchPoolBtn.innerText = "切换词库：全部单词"
+  }else{
+    switchPoolBtn.innerText = "切换词库：仅错题"
+    if(wrongList.length === 0){
+      alert("错题列表是空的，先标记一些不会的单词！")
+      useAllPool = true
+      switchPoolBtn.innerText = "切换词库：全部单词"
+      return
+    }
+  }
+  randomOne()
+}
+
+exportBtn.onclick = async ()=>{
+  if(wrongList.length===0){
+    alert("暂无错题！")
+    return
+  }
+  const content = `
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        ${wrongList.map(i=>`
+          <w:p>
+            <w:r><w:t>${i.w} - ${i.m}</w:t></w:r>
+          </w:p>
+        `).join('')}
+      </w:body>
+    </w:document>
+  `
+  const zip = new PizZip()
+  try{
+    const res = await fetch("./template.docx")
+    const templateBuf = await res.arrayBuffer()
+    zip.load(templateBuf)
+    zip.file("word/document.xml", content)
+    const out = zip.generate({type:"blob"})
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(out)
+    a.download = "错题本.docx"
+    a.click()
+  }catch(e){
+    alert("模板加载失败，请确认template.docx和html放在同一目录！")
+  }
+}
+</script>
+</body>
+</html>
